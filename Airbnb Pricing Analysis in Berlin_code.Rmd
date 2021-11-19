@@ -1,0 +1,199 @@
+---
+title: "Airbnb Pricing Analysis in Berlin"
+author: "Junqian Zhang"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data Description
+```{r, echo=FALSE, warning=FALSE}
+library(dplyr)
+data <- read.csv('listings_berlin.csv')
+#data<- dplyr::filter(data, neighbourhood_group != "Reinickendorf" & neighbourhood_group != "Treptow - Köpenick")
+data <- dplyr::select(data, -c('id', 'name', 'host_id', 'host_name', 'neighbourhood', 'neighbourhood_group','reviews_per_month', 'last_review'))
+data <- na.omit(data) 
+summary(data)
+```
+
+## Normality Check of Dependent Variable
+```{r, echo=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+data <- dplyr::filter(data, price > (mean(data$price) - 3* sd(data$price)) & price < (mean(data$price) + 3* sd(data$price)))
+data <- dplyr::filter(data, price > 0)
+data$logprice = log(data$price)
+summary(data$price)
+price_n <- ggdensity(data, x = "price", fill = "lightgray", title = "Price") +
+  stat_overlay_normal_density(color = "red", linetype = "dashed")
+logprice_n <- ggdensity(data, x = "logprice", fill = "lightgray", title = "Price") +
+  stat_overlay_normal_density(color = "red", linetype = "dashed")
+figure_n <- ggarrange(price_n, logprice_n, ncol=2, nrow=1)
+figure_n
+```
+
+## Data Distribution and Correlation
+```{r, echo=FALSE, warning=FALSE}
+quantile(data$minimum_nights, 0.99)
+quantile(data$number_of_reviews, 0.99)
+quantile(data$calculated_host_listings_count, 0.99)
+quantile(data$availability_365, 0.99)
+data <- filter(data, minimum_nights <= 100)
+data <- filter(data, number_of_reviews <= 244)
+data <- filter(data, calculated_host_listings_count <= 44)
+data <- filter(data, availability_365 <= 365)
+library(PerformanceAnalytics)
+chart.Correlation(cbind(price = data$logprice, dplyr::select(data, -c('room_type', 'price', 'logprice'))), histogram=TRUE, pch=20)
+```
+
+## Relation between logprice and location
+```{r, echo=FALSE, warning=FALSE}
+library(raster)
+library(ggplot2)
+#germany <- getData(country = "Germany", level = 1) 
+#map <- ggplot() +
+#  geom_polygon(data = germany,
+#               aes(x = long, y = lat, group = group),
+#               colour = "grey10", fill = "#fff7bc") + ylim(52.3,52.7) + xlim(13.08,13.77)+theme(panel.background = element_blank())+ theme(axis.title.x=element_blank(),
+#        axis.text.x=element_blank(),
+#        axis.ticks.x=element_blank())+theme(axis.title.y=element_blank(),
+#        axis.text.y=element_blank(),
+#        axis.ticks.y=element_blank())
+berlin_background <- png::readPNG("berlin.png")
+ggplot(data, aes(x=longitude, y=latitude, col= logprice)) + background_image(berlin_background) + geom_point(size=1)+ ylim(52.3,52.7) + xlim(13.08,13.77)
+```
+
+
+## Relation between Room type and Price
+```{r, echo=FALSE, warning=FALSE}
+library(car)
+library(plyr)
+vv <- as.vector(unique(data$room_type))
+data$room_type <- factor(data$room_type, levels = vv, labels = vv, ordered = FALSE)
+ggplot(data, aes(x = room_type, y = price)) +
+    geom_boxplot() + stat_summary(fun.y = median, geom = 'line', group= 1, color= "orange", size = 1.2)+ annotate("text", x = 1:length(table(data$room_type)), y = aggregate(price ~ room_type, data, median)[ , 2], label = table(data$room_type),col = "black", vjust=-1) + xlab("Room Type") + ylab("Price")+ ylim(0,500)
+summary(aov(price ~ room_type, data=data))
+ddply(data,~room_type,summarise,mean=mean(price),sd=sd(price),n=length(price))
+```
+
+## Difference between Private room and Shared room
+```{r, echo=FALSE, warning=FALSE}
+library(ggpubr)
+set.seed(42)
+private <- dplyr::filter(data, room_type=="Private room")
+private$id <- seq(1,7835,1)
+private <- private[match(sample(unique(private$id),206),private$id),]
+shared <-  dplyr::filter(data, room_type=="Shared room")
+t.test(private$logprice, shared$logprice, alternative = "two.sided", var.equal = FALSE)
+```
+
+## Data Splitting
+```{r, echo=FALSE, warning=FALSE}
+library(caret)
+set.seed(42)
+data$price <- NULL
+train_indices<- createDataPartition(data$logprice,p=0.7,list=FALSE)
+dtrain <- data[train_indices,]
+dtest <- data[-train_indices,]
+pp <- preProcess(dtrain, method = "range")
+dtrain_scale <- predict(pp, dtrain)
+dtest_scale <- predict(pp, dtest)
+eval_results <- function(true, predicted, df) {
+    SSE <- sum((predicted - true)^2)
+    SST <- sum((true - mean(true))^2)
+    R_square <- round(1 - SSE / SST,4)
+    RMSE = round(sqrt(SSE/nrow(df)),4)
+    # Model performance metrics
+    data.frame(
+        RMSE = RMSE,
+        Rsquare = R_square
+    )
+}
+```
+
+# Mulitple Linear Regression
+
+## Full Model
+```{r, echo=FALSE, warning=FALSE}
+full <- lm(logprice~.,data = dtrain)
+summary(full)
+eval_results(dtest$logprice, predict(full, dtest), dtest)
+```
+
+## Regression with Forward Stepwise Method
+```{r, echo=FALSE, warning=FALSE}
+library(leaps)
+regfit.fwd=regsubsets(logprice~.,data=dtrain,method="forward")
+summary.fwd <- summary(regfit.fwd)
+plot(summary.fwd$bic,xlab="Number of Variables",ylab="bic")
+points(which.min(summary.fwd$bic),summary.fwd$bic[which.min(summary.fwd$bic)],pch=20,col="red")
+```
+
+```{r, echo=FALSE, warning=FALSE}
+plot(regfit.fwd, scale = 'bic')
+grid(nx=10,ny=8,col="grey",lty = "solid")
+abline(h=8, col="orange", lwd = 10)
+text(8,7, "Optimal Model", col="orange",cex = 0.8)
+```
+
+```{r, echo=FALSE, warning=FALSE}
+model1 <- lm(logprice~., data =dplyr::select(dtrain, -c('latitude', 'longitude')))
+summary(model1)
+eval_results(dtest$logprice, predict(model1, dtest), dtest)
+```
+```{r, echo=FALSE, warning=FALSE}
+par(mfrow=c(2,2))
+plot(model1)
+```
+## Collinearity
+```{r, echo=FALSE, warning=FALSE}
+library(car)
+vif(model1)
+```
+
+```{r, echo=FALSE, warning=FALSE}
+library(MASS)
+robust <- rlm(logprice ~ ., data = dplyr::select(dtrain, -c('latitude', 'longitude')))
+summary(robust)
+eval_results(dtest$logprice, predict(robust, dtest), dtest)
+```
+
+```{r, echo=FALSE, warning=FALSE}
+hweights <- data.frame(resid = robust$resid, weight = robust$w)
+hweights2 <- hweights[order(robust$w), ]
+hweights2[11564:11573, ]
+hweights2[1:10, ]
+```
+
+
+# Decision Tree
+
+```{r, echo=FALSE, warning=FALSE}
+library(rpart)
+library(rpart.plot)
+set.seed(42)
+tree <- rpart(logprice~.,data=dtrain, method = "anova")
+printcp(tree)
+plotcp(tree)
+rpart.plot(tree)
+eval_results(dtest$logprice, predict(tree, dtest), dtest)
+```
+## Random Forest
+```{r, echo=FALSE, warning=FALSE}
+library(randomForest)
+library(vip) 
+library(pdp)
+set.seed(42)
+rf = randomForest(logprice ~., data = dtrain, ntree=1000)
+rf
+plot(rf)
+vip(rf, num_features = 7, bar = FALSE)
+eval_results(dtest$logprice, predict(rf, dtest), dtest)
+```
+
+
+
+
